@@ -5,6 +5,11 @@ set -euo pipefail
 : "${PROVIDER_USERNAME:?PROVIDER_USERNAME is required}"
 : "${PROVIDER_PASSWORD:?PROVIDER_PASSWORD is required}"
 
+FROM_USER_LINE=""
+if [ -n "${PROVIDER_FROM_USER:-}" ]; then
+	FROM_USER_LINE="from_user=${PROVIDER_FROM_USER}"
+fi
+
 cat > /etc/asterisk/pjsip.conf <<EOF
 [global]
 type=global
@@ -33,7 +38,7 @@ disallow=all
 allow=ulaw,alaw
 outbound_auth=provider-auth
 aors=provider-aor
-from_user=${PROVIDER_USERNAME}
+${FROM_USER_LINE}
 from_domain=${PROVIDER_HOST}
 trust_id_outbound=yes
 send_pai=yes
