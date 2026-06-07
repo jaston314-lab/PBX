@@ -10,8 +10,11 @@ RUN apt-get update \
 COPY etc/asterisk/pjsip.conf /etc/asterisk/pjsip.conf
 COPY etc/asterisk/extensions.conf /etc/asterisk/extensions.conf
 COPY etc/asterisk/rtp.conf /etc/asterisk/rtp.conf
+COPY start-asterisk.sh /usr/local/bin/start-asterisk.sh
+
+RUN chmod +x /usr/local/bin/start-asterisk.sh
 
 EXPOSE 5060/udp
 EXPOSE 10000-40000/udp
 
-CMD ["asterisk", "-f", "-vvv"]
+CMD ["/usr/local/bin/start-asterisk.sh"]
