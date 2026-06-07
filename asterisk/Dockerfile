@@ -1,10 +1,8 @@
-FROM debian:12-slim
+FROM ubuntu:22.04
 
 RUN apt-get update \
   && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
     asterisk \
-    asterisk-core-sounds-en \
-    asterisk-moh-opsound-wav \
     ca-certificates \
     curl \
   && rm -rf /var/lib/apt/lists/*
