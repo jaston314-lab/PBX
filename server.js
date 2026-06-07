@@ -17,6 +17,7 @@ const ADMIN_USER = process.env.ADMIN_USER || '';
 const ADMIN_PASS = process.env.ADMIN_PASS || '';
 const FALLBACK_NUMBER = (process.env.FALLBACK_NUMBER || '15551234567').trim();
 const SIP_REDIRECT_HOST = (process.env.SIP_REDIRECT_HOST || '').trim();
+const SIP_REDIRECT_NUMBER_FORMAT = (process.env.SIP_REDIRECT_NUMBER_FORMAT || 'plus').trim().toLowerCase();
 const NTP_ENABLED = String(process.env.NTP_ENABLED || 'false').toLowerCase() === 'true';
 const NTP_SERVER = (process.env.NTP_SERVER || 'pool.ntp.org').trim();
 const NTP_SYNC_INTERVAL_MS = Number(process.env.NTP_SYNC_INTERVAL_MS || 300000);
@@ -314,6 +315,19 @@ function normalizeUkMobile(input) {
   return `+44${normalized}`;
 }
 
+function formatRedirectDialNumber(number) {
+  const cleaned = normalizeDialTarget(number);
+  if (!cleaned) {
+    return null;
+  }
+
+  if (SIP_REDIRECT_NUMBER_FORMAT === 'no_plus') {
+    return cleaned.startsWith('+') ? cleaned.slice(1) : cleaned;
+  }
+
+  return cleaned;
+}
+
 function displayUkMobile(value) {
   if (typeof value !== 'string' || !/^\+447\d{9}$/.test(value)) {
     return value;
@@ -579,7 +593,15 @@ async function handleInvite(request) {
       ? request.uri.host
       : null;
   const redirectHost = SIP_REDIRECT_HOST || requestHost || sourceAddress;
-  const redirectUri = sip.parseUri(`sip:${targetNumber}@${redirectHost};user=phone`);
+  const formattedRedirectNumber = formatRedirectDialNumber(targetNumber);
+
+  if (!formattedRedirectNumber) {
+    console.error('SIP INVITE redirect number formatting failed');
+    sip.send(sip.makeResponse(request, 500, 'Server Internal Error'));
+    return;
+  }
+
+  const redirectUri = sip.parseUri(`sip:${formattedRedirectNumber}@${redirectHost};user=phone`);
 
   const response = sip.makeResponse(request, 302, 'Moved Temporarily');
   response.headers = response.headers || {};
@@ -587,7 +609,7 @@ async function handleInvite(request) {
 
   try {
     sip.send(response);
-    console.log(`SIP INVITE redirected to ${targetNumber} via ${redirectHost}`);
+    console.log(`SIP INVITE redirected to ${formattedRedirectNumber} via ${redirectHost}`);
   } catch (err) {
     console.error('Failed to send SIP 302 response:', err.message);
     sip.send(sip.makeResponse(request, 500, 'Server Internal Error'));
