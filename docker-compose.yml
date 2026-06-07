@@ -1,0 +1,14 @@
+services:
+  voip-oncall-router:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: voip-oncall-router
+    ports:
+      - "8080:8080"
+      - "5060:5060/udp"
+    env_file:
+      - .env
+    volumes:
+      - ./data:/app/data
+    restart: unless-stopped

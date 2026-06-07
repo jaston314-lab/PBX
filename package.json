@@ -1,0 +1,25 @@
+{
+  "name": "voip-oncall-router",
+  "version": "1.0.0",
+  "description": "Dockerized VoIP on-call router with SIP 302 redirect and web management portal",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js",
+    "init-db": "node db/init.js"
+  },
+  "keywords": [
+    "sip",
+    "voip",
+    "express",
+    "sqlite",
+    "docker"
+  ],
+  "author": "",
+  "license": "MIT",
+  "dependencies": {
+    "dotenv": "^16.4.5",
+    "express": "^4.19.2",
+    "sip": "^0.0.6",
+    "sqlite3": "^5.1.7"
+  }
+}
