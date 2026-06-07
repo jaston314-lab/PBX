@@ -17,6 +17,7 @@ const ADMIN_USER = process.env.ADMIN_USER || '';
 const ADMIN_PASS = process.env.ADMIN_PASS || '';
 const FALLBACK_NUMBER = (process.env.FALLBACK_NUMBER || '15551234567').trim();
 const SIP_REDIRECT_HOST = (process.env.SIP_REDIRECT_HOST || '').trim();
+const SIP_REDIRECT_PORT = Number(process.env.SIP_REDIRECT_PORT || 0);
 const SIP_REDIRECT_NUMBER_FORMAT = (process.env.SIP_REDIRECT_NUMBER_FORMAT || 'plus').trim().toLowerCase();
 const NTP_ENABLED = String(process.env.NTP_ENABLED || 'false').toLowerCase() === 'true';
 const NTP_SERVER = (process.env.NTP_SERVER || 'pool.ntp.org').trim();
@@ -328,6 +329,19 @@ function formatRedirectDialNumber(number) {
   return cleaned;
 }
 
+function formatRedirectHost(host) {
+  if (!host) {
+    return null;
+  }
+
+  const hasPortAlready = /:\d+$/.test(host);
+  if (!hasPortAlready && Number.isInteger(SIP_REDIRECT_PORT) && SIP_REDIRECT_PORT > 0) {
+    return `${host}:${SIP_REDIRECT_PORT}`;
+  }
+
+  return host;
+}
+
 function displayUkMobile(value) {
   if (typeof value !== 'string' || !/^\+447\d{9}$/.test(value)) {
     return value;
@@ -592,7 +606,7 @@ async function handleInvite(request) {
     request && request.uri && typeof request.uri.host === 'string' && request.uri.host
       ? request.uri.host
       : null;
-  const redirectHost = SIP_REDIRECT_HOST || requestHost || sourceAddress;
+  const redirectHost = formatRedirectHost(SIP_REDIRECT_HOST || requestHost || sourceAddress);
   const formattedRedirectNumber = formatRedirectDialNumber(targetNumber);
 
   if (!formattedRedirectNumber) {
