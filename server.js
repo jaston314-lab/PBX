@@ -16,6 +16,8 @@ const SIP_PORT = Number(process.env.SIP_PORT || 5060);
 const ADMIN_USER = process.env.ADMIN_USER || '';
 const ADMIN_PASS = process.env.ADMIN_PASS || '';
 const FALLBACK_NUMBER = (process.env.FALLBACK_NUMBER || '15551234567').trim();
+const ENABLE_SIP_SERVER = String(process.env.ENABLE_SIP_SERVER || 'true').toLowerCase() === 'true';
+const ROUTING_API_TOKEN = (process.env.ROUTING_API_TOKEN || '').trim();
 const SIP_REDIRECT_HOST = (process.env.SIP_REDIRECT_HOST || '').trim();
 const SIP_REDIRECT_PORT = Number(process.env.SIP_REDIRECT_PORT || 0);
 const SIP_REDIRECT_NUMBER_FORMAT = (process.env.SIP_REDIRECT_NUMBER_FORMAT || 'plus').trim().toLowerCase();
@@ -150,6 +152,16 @@ function allAsync(sql, params = []) {
 function unauthorized(res) {
   res.set('WWW-Authenticate', 'Basic realm="On-Call Router", charset="UTF-8"');
   return res.status(401).json({ error: 'Unauthorized' });
+}
+
+function hasValidRoutingToken(req) {
+  if (!ROUTING_API_TOKEN) {
+    return false;
+  }
+
+  const headerToken = req.headers['x-routing-token'];
+  const queryToken = req.query && typeof req.query.token === 'string' ? req.query.token : '';
+  return headerToken === ROUTING_API_TOKEN || queryToken === ROUTING_API_TOKEN;
 }
 
 function basicAuth(req, res, next) {
@@ -803,6 +815,14 @@ function startHttpServer() {
     if (req.path === '/health') {
       return next();
     }
+
+    if (req.path === '/api/routing/current' || req.path === '/api/routing/current.txt') {
+      if (!hasValidRoutingToken(req)) {
+        return res.status(401).json({ error: 'Invalid routing token' });
+      }
+      return next();
+    }
+
     return basicAuth(req, res, next);
   });
 
@@ -811,6 +831,30 @@ function startHttpServer() {
 
   app.get('/health', (_req, res) => {
     res.json({ status: 'ok' });
+  });
+
+  app.get('/api/routing/current', async (_req, res) => {
+    try {
+      const routingDecision = await getInviteTargetNumber();
+      return res.json({
+        number: routingDecision.number,
+        source: routingDecision.source
+      });
+    } catch (err) {
+      console.error('Failed to resolve current routing number:', err.message);
+      return res.status(500).json({ error: 'Failed to resolve current routing number' });
+    }
+  });
+
+  app.get('/api/routing/current.txt', async (_req, res) => {
+    try {
+      const routingDecision = await getInviteTargetNumber();
+      res.type('text/plain');
+      return res.send(`${routingDecision.number}\n`);
+    } catch (err) {
+      console.error('Failed to resolve current routing number text:', err.message);
+      return res.status(500).type('text/plain').send('');
+    }
   });
 
   app.get('/api/engineers', async (_req, res) => {
@@ -1185,7 +1229,14 @@ async function bootstrap() {
 
   startTimeSyncLoop();
   startHttpServer();
-  startSipServer();
+
+  if (ENABLE_SIP_SERVER) {
+    startSipServer();
+  } else {
+    logEvent('info', 'sip.server.disabled', {
+      reason: 'ENABLE_SIP_SERVER=false'
+    });
+  }
 }
 
 bootstrap().catch((err) => {
