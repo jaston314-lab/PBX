@@ -19,6 +19,8 @@ const FALLBACK_NUMBER = (process.env.FALLBACK_NUMBER || '15551234567').trim();
 const SIP_REDIRECT_HOST = (process.env.SIP_REDIRECT_HOST || '').trim();
 const SIP_REDIRECT_PORT = Number(process.env.SIP_REDIRECT_PORT || 0);
 const SIP_REDIRECT_NUMBER_FORMAT = (process.env.SIP_REDIRECT_NUMBER_FORMAT || 'plus').trim().toLowerCase();
+const LOG_LEVEL = (process.env.LOG_LEVEL || 'info').trim().toLowerCase();
+const SIP_LOG_VERBOSE = String(process.env.SIP_LOG_VERBOSE || 'true').toLowerCase() === 'true';
 const NTP_ENABLED = String(process.env.NTP_ENABLED || 'false').toLowerCase() === 'true';
 const NTP_SERVER = (process.env.NTP_SERVER || 'pool.ntp.org').trim();
 const NTP_SYNC_INTERVAL_MS = Number(process.env.NTP_SYNC_INTERVAL_MS || 300000);
@@ -45,6 +47,72 @@ const serverClockState = {
   lastError: null,
   intervalRef: null
 };
+
+const logLevelPriority = {
+  debug: 10,
+  info: 20,
+  warn: 30,
+  error: 40
+};
+
+function shouldLog(level) {
+  const current = logLevelPriority[LOG_LEVEL] || logLevelPriority.info;
+  const requested = logLevelPriority[level] || logLevelPriority.info;
+  return requested >= current;
+}
+
+function logEvent(level, event, details = {}) {
+  if (!shouldLog(level)) {
+    return;
+  }
+
+  const payload = {
+    ts: new Date().toISOString(),
+    level,
+    event,
+    ...details
+  };
+
+  if (level === 'error') {
+    console.error(JSON.stringify(payload));
+    return;
+  }
+
+  if (level === 'warn') {
+    console.warn(JSON.stringify(payload));
+    return;
+  }
+
+  console.log(JSON.stringify(payload));
+}
+
+function getSipRequestMeta(request) {
+  if (!request) {
+    return {};
+  }
+
+  const viaFirst =
+    request.headers && Array.isArray(request.headers.via) && request.headers.via.length > 0
+      ? request.headers.via[0]
+      : null;
+  const fromHeader = request.headers && request.headers.from ? request.headers.from : null;
+  const toHeader = request.headers && request.headers.to ? request.headers.to : null;
+  const callId = request.headers && request.headers['call-id'] ? request.headers['call-id'] : null;
+  const cseq = request.headers && request.headers.cseq ? request.headers.cseq.seq : null;
+
+  return {
+    method: request.method || null,
+    source_address: request.source_address || null,
+    source_port: request.source_port || null,
+    request_uri: request.uri && request.uri.host ? `sip:${request.uri.user || ''}@${request.uri.host}` : null,
+    call_id: callId,
+    cseq,
+    from_user: fromHeader && fromHeader.uri ? fromHeader.uri.user : null,
+    to_user: toHeader && toHeader.uri ? toHeader.uri.user : null,
+    via_host: viaFirst && viaFirst.host ? viaFirst.host : null,
+    via_port: viaFirst && viaFirst.port ? viaFirst.port : null
+  };
+}
 
 function runAsync(sql, params = []) {
   return new Promise((resolve, reject) => {
@@ -439,7 +507,7 @@ async function getInviteTargetNumber() {
   const rotaEngineer = await getEffectiveEngineerForDate(today);
   const rotaNumber = normalizeDialTarget(rotaEngineer && rotaEngineer.mobile_number);
   if (rotaNumber) {
-    return rotaNumber;
+    return { number: rotaNumber, source: rotaEngineer.source || 'rota' };
   }
 
   const active = await getAsync(
@@ -448,7 +516,7 @@ async function getInviteTargetNumber() {
 
   const activeNumber = normalizeDialTarget(active && active.mobile_number);
   if (activeNumber) {
-    return activeNumber;
+    return { number: activeNumber, source: 'manual_active' };
   }
 
   const fallback = normalizeDialTarget(FALLBACK_NUMBER);
@@ -456,7 +524,7 @@ async function getInviteTargetNumber() {
     throw new Error('No rota assignee, no active engineer, and FALLBACK_NUMBER is missing');
   }
 
-  return fallback;
+  return { number: fallback, source: 'fallback' };
 }
 
 async function getWeekSchedule(weekStartString) {
@@ -591,15 +659,25 @@ function extractSipSourceAddress(request) {
 }
 
 async function handleInvite(request) {
-  let targetNumber;
+  let routingDecision;
+  const requestMeta = getSipRequestMeta(request);
+
+  if (SIP_LOG_VERBOSE) {
+    logEvent('info', 'sip.invite.received', requestMeta);
+  }
 
   try {
-    targetNumber = await getInviteTargetNumber();
+    routingDecision = await getInviteTargetNumber();
   } catch (err) {
-    console.error('SIP INVITE routing lookup failed:', err.message);
+    logEvent('error', 'sip.invite.lookup_failed', {
+      ...requestMeta,
+      error: err.message
+    });
     sip.send(sip.makeResponse(request, 500, 'Server Internal Error'));
     return;
   }
+
+  const targetNumber = routingDecision.number;
 
   const sourceAddress = extractSipSourceAddress(request);
   const requestHost =
@@ -610,7 +688,12 @@ async function handleInvite(request) {
   const formattedRedirectNumber = formatRedirectDialNumber(targetNumber);
 
   if (!formattedRedirectNumber) {
-    console.error('SIP INVITE redirect number formatting failed');
+    logEvent('error', 'sip.invite.number_format_failed', {
+      ...requestMeta,
+      route_source: routingDecision.source,
+      raw_target_number: targetNumber,
+      configured_number_format: SIP_REDIRECT_NUMBER_FORMAT
+    });
     sip.send(sip.makeResponse(request, 500, 'Server Internal Error'));
     return;
   }
@@ -621,11 +704,29 @@ async function handleInvite(request) {
   response.headers = response.headers || {};
   response.headers.contact = [{ uri: redirectUri }];
 
+  logEvent('info', 'sip.invite.redirect_prepared', {
+    ...requestMeta,
+    route_source: routingDecision.source,
+    raw_target_number: targetNumber,
+    redirect_number: formattedRedirectNumber,
+    redirect_host: redirectHost,
+    redirect_contact: `sip:${formattedRedirectNumber}@${redirectHost};user=phone`
+  });
+
   try {
     sip.send(response);
-    console.log(`SIP INVITE redirected to ${formattedRedirectNumber} via ${redirectHost}`);
+    logEvent('info', 'sip.invite.redirect_sent', {
+      ...requestMeta,
+      status: 302,
+      reason: 'Moved Temporarily',
+      route_source: routingDecision.source,
+      redirect_contact: `sip:${formattedRedirectNumber}@${redirectHost};user=phone`
+    });
   } catch (err) {
-    console.error('Failed to send SIP 302 response:', err.message);
+    logEvent('error', 'sip.invite.redirect_send_failed', {
+      ...requestMeta,
+      error: err.message
+    });
     sip.send(sip.makeResponse(request, 500, 'Server Internal Error'));
   }
 }
@@ -640,11 +741,24 @@ function startSipServer() {
     (request) => {
       try {
         if (!request || !request.method) {
+          logEvent('warn', 'sip.request.invalid', {
+            reason: 'missing_method_or_request'
+          });
           return;
+        }
+
+        const requestMeta = getSipRequestMeta(request);
+        if (SIP_LOG_VERBOSE) {
+          logEvent('debug', 'sip.request.received', requestMeta);
         }
 
         if (request.method === 'OPTIONS') {
           sip.send(sip.makeResponse(request, 200, 'OK'));
+          logEvent('info', 'sip.options.ok', {
+            ...requestMeta,
+            status: 200,
+            reason: 'OK'
+          });
           return;
         }
 
@@ -654,8 +768,16 @@ function startSipServer() {
         }
 
         sip.send(sip.makeResponse(request, 405, 'Method Not Allowed'));
+        logEvent('warn', 'sip.request.method_not_allowed', {
+          ...requestMeta,
+          status: 405,
+          reason: 'Method Not Allowed'
+        });
       } catch (err) {
-        console.error('Unhandled SIP request error:', err.message);
+        logEvent('error', 'sip.request.unhandled_error', {
+          error: err.message,
+          ...(request ? getSipRequestMeta(request) : {})
+        });
         if (request) {
           sip.send(sip.makeResponse(request, 500, 'Server Internal Error'));
         }
@@ -663,7 +785,15 @@ function startSipServer() {
     }
   );
 
-  console.log(`SIP server listening on UDP ${SIP_PORT}`);
+  logEvent('info', 'sip.server.started', {
+    bind_address: '0.0.0.0',
+    bind_port: SIP_PORT,
+    redirect_host: SIP_REDIRECT_HOST || null,
+    redirect_port: SIP_REDIRECT_PORT > 0 ? SIP_REDIRECT_PORT : null,
+    redirect_number_format: SIP_REDIRECT_NUMBER_FORMAT,
+    log_level: LOG_LEVEL,
+    sip_log_verbose: SIP_LOG_VERBOSE
+  });
 }
 
 function startHttpServer() {
