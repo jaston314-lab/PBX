@@ -61,8 +61,7 @@ The Asterisk bridge preserves the inbound caller ID when it dials the on-call
 engineer by setting the outbound caller ID plus SIP identity headers
 (`P-Asserted-Identity`, `Remote-Party-ID`, and `Diversion`). It also stores the
 original called number as `ORIG_DID` for the diversion header. Caller IDs are
-normalised to digits-only E.164 on the outbound SIP leg, which is the format many
-UK providers expect for CLI screening.
+preserved in `+44` format on the outbound SIP leg by default.
 
 Your SIP provider must allow CLI pass-through / caller ID presentation for
 forwarded calls. If Asterisk logs show the correct original caller ID being sent

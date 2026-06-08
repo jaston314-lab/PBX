@@ -454,6 +454,10 @@ async function getRotaConfig() {
   return { rota_start_date: startDate };
 }
 
+async function clearEmptyRotaOverrides() {
+  await runAsync('DELETE FROM rota_overrides WHERE engineer_id IS NULL');
+}
+
 async function computeBaseEngineerForDate(dateString, engineers, rotaStartDate) {
   if (!engineers.length) {
     return null;
@@ -485,11 +489,7 @@ async function getEffectiveEngineerForDate(dateString) {
   );
 
   if (override) {
-    if (!override.engineer_id) {
-      return null;
-    }
-
-    if (override.id) {
+    if (override.engineer_id && override.id) {
       return {
         id: override.id,
         name: override.name,
@@ -562,16 +562,14 @@ async function getWeekSchedule(weekStartString) {
     const effectiveEngineer =
       override && override.engineer_id
         ? engineers.find((engineer) => engineer.id === override.engineer_id) || null
-        : override && !override.engineer_id
-          ? null
-          : baseEngineer;
+        : baseEngineer;
 
     days.push({
       date: dateString,
       weekday: currentDate.toLocaleDateString('en-GB', { weekday: 'long', timeZone: 'UTC' }),
       base_engineer_id: baseEngineer ? baseEngineer.id : null,
       base_engineer_name: baseEngineer ? baseEngineer.name : null,
-      override_engineer_id: override ? override.engineer_id : undefined,
+      override_engineer_id: override && override.engineer_id ? override.engineer_id : undefined,
       effective_engineer_id: effectiveEngineer ? effectiveEngineer.id : null,
       effective_engineer_name: effectiveEngineer ? effectiveEngineer.name : null
     });
@@ -600,7 +598,8 @@ async function getMonthSchedule(monthString) {
   const overrides = await allAsync(
     `SELECT override_date, engineer_id
      FROM rota_overrides
-     WHERE override_date BETWEEN ? AND ?`,
+     WHERE override_date BETWEEN ? AND ?
+       AND engineer_id IS NOT NULL`,
     [monthStartString, monthEndString]
   );
 
@@ -616,9 +615,7 @@ async function getMonthSchedule(monthString) {
 
     let effectiveEngineer = baseEngineer;
     if (overrideEngineerId !== undefined) {
-      effectiveEngineer = overrideEngineerId
-        ? engineers.find((engineer) => engineer.id === overrideEngineerId) || null
-        : null;
+      effectiveEngineer = engineers.find((engineer) => engineer.id === overrideEngineerId) || null;
     }
 
     days.push({
@@ -1096,6 +1093,11 @@ function startHttpServer() {
     }
 
     try {
+      if (engineerId === null) {
+        await runAsync('DELETE FROM rota_overrides WHERE override_date = ?', [overrideDate]);
+        return res.json({ success: true });
+      }
+
       if (engineerId !== null) {
         const engineer = await getAsync('SELECT id FROM engineers WHERE id = ?', [engineerId]);
         if (!engineer) {
@@ -1141,6 +1143,15 @@ function startHttpServer() {
       const monday = toWeekStartMonday(parsedStart);
       await runAsync('BEGIN IMMEDIATE TRANSACTION');
 
+      if (engineerId === null) {
+        await runAsync('DELETE FROM rota_overrides WHERE override_date BETWEEN ? AND ?', [
+          formatDateUTC(monday),
+          formatDateUTC(addDays(monday, 6))
+        ]);
+        await runAsync('COMMIT');
+        return res.json({ success: true, week_start: formatDateUTC(monday) });
+      }
+
       for (let offset = 0; offset < 7; offset += 1) {
         const dateString = formatDateUTC(addDays(monday, offset));
         await runAsync(
@@ -1181,6 +1192,7 @@ function startHttpServer() {
 async function bootstrap() {
   await initializeDatabase(db);
   await seedEngineersIfEmpty(db);
+  await clearEmptyRotaOverrides();
 
   startTimeSyncLoop();
   startHttpServer();
