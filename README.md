@@ -57,6 +57,7 @@ Restrict `8080/tcp` to your management IP.
 
 The Asterisk bridge preserves the inbound caller ID when it dials the on-call
 engineer by setting the outbound caller ID plus SIP identity headers
-(`P-Asserted-Identity` and `Remote-Party-ID`). Your SIP provider must allow CLI
-pass-through / caller ID presentation for forwarded calls; otherwise the
-provider may replace it with your main trunk number.
+(`P-Asserted-Identity`, `Remote-Party-ID`, and `Diversion`). It also stores the
+original called number as `ORIG_DID` for the diversion header. Your SIP provider
+must allow CLI pass-through / caller ID presentation for forwarded calls;
+otherwise the provider may replace it with your main trunk number.
