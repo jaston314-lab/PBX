@@ -12,8 +12,7 @@ fi
 
 MEDIA_ADDRESS_LINE=""
 if [ -n "${EXTERNAL_MEDIA_IP:-}" ]; then
-	MEDIA_ADDRESS_LINE="media_address=${EXTERNAL_MEDIA_IP}
-bind_rtp_to_media_address=yes"
+	MEDIA_ADDRESS_LINE="external_media_address=${EXTERNAL_MEDIA_IP}"
 fi
 
 cat > /etc/asterisk/pjsip.conf <<EOF
@@ -25,6 +24,7 @@ user_agent=OnCall-Asterisk
 type=transport
 protocol=udp
 bind=0.0.0.0:5060
+${MEDIA_ADDRESS_LINE}
 
 [provider-auth]
 type=auth
@@ -57,7 +57,6 @@ direct_media=no
 rtp_symmetric=yes
 force_rport=yes
 rewrite_contact=yes
-${MEDIA_ADDRESS_LINE}
 
 [provider-inbound]
 type=endpoint
@@ -70,7 +69,6 @@ direct_media=no
 rtp_symmetric=yes
 force_rport=yes
 rewrite_contact=yes
-${MEDIA_ADDRESS_LINE}
 
 [provider-identify-1]
 type=identify
