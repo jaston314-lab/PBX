@@ -38,6 +38,8 @@ Set values in `.env`:
 - `PROVIDER_HOST` (for example `talk.voipcp.com`)
 - `PROVIDER_USERNAME`
 - `PROVIDER_PASSWORD`
+- `PROVIDER_FROM_USER` (optional, your trunk/main number if the provider requires
+  the SIP `From` user to be an authorised number)
 - `NTP_ENABLED`
 - `NTP_SERVER`
 
@@ -67,3 +69,16 @@ forwarded calls. If Asterisk logs show the correct original caller ID being sent
 but the receiving phone still shows the trunk number, the provider is replacing
 the CLI and needs to enable pass-through or accept the forwarded-call identity
 headers for the trunk.
+
+To confirm what Asterisk actually sends to the provider, enable SIP packet
+logging before a test call:
+
+```bash
+docker exec -it asterisk-bridge asterisk -rvvv
+pjsip set logger on
+```
+
+Then check the outbound `INVITE` for `From`, `P-Asserted-Identity`,
+`Remote-Party-ID`, and `Diversion`. If those contain the original caller ID but
+the receiving phone still shows the trunk number, the provider is rewriting the
+CLI after Asterisk sends the call.
