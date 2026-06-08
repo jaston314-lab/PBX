@@ -85,6 +85,10 @@
         font-size: 0.8rem;
         min-width: 160px;
       }
+
+      .current-on-call {
+        border-left: 4px solid var(--accent-soft);
+      }
     </style>
   </head>
   <body>
@@ -139,7 +143,6 @@
                       <th>Order</th>
                       <th>Name</th>
                       <th>UK Mobile</th>
-                      <th>Status</th>
                       <th class="text-end">Actions</th>
                     </tr>
                   </thead>
@@ -150,6 +153,12 @@
 
             <section>
               <h2 class="h5 section-title mb-3">Monthly Rota Calendar</h2>
+
+              <div class="current-on-call bg-light rounded p-3 mb-3">
+                <div class="small text-muted">Currently on call</div>
+                <div id="currentOnCallName" class="h5 mb-0">Loading...</div>
+                <div id="currentOnCallDetail" class="small text-muted"></div>
+              </div>
 
               <div class="row g-3 align-items-end mb-3">
                 <div class="col-12 col-md-3">
@@ -220,6 +229,8 @@
       const weekOverrideEngineer = document.getElementById('weekOverrideEngineer');
       const applyWeekOverrideBtn = document.getElementById('applyWeekOverrideBtn');
       const saveRotaStartBtn = document.getElementById('saveRotaStartBtn');
+      const currentOnCallName = document.getElementById('currentOnCallName');
+      const currentOnCallDetail = document.getElementById('currentOnCallDetail');
       const digitalClock = document.getElementById('digitalClock');
       const clockSource = document.getElementById('clockSource');
 
@@ -236,6 +247,11 @@
       }
 
       function todayIso() {
+        if (state.clockServerMsAtSync && state.clockLocalMsAtSync) {
+          const serverNow = state.clockServerMsAtSync + (Date.now() - state.clockLocalMsAtSync);
+          return new Date(serverNow).toISOString().slice(0, 10);
+        }
+
         return new Date().toISOString().slice(0, 10);
       }
 
@@ -334,9 +350,6 @@
 
         state.engineers.forEach((engineer, index) => {
           const row = document.createElement('tr');
-          const activeBadge = engineer.is_active
-            ? '<span class="badge text-bg-success">Manual Active</span>'
-            : '<span class="badge text-bg-secondary">Normal</span>';
 
           row.innerHTML = `
             <td>
@@ -355,12 +368,8 @@
             <td>
               <input class="form-control form-control-sm" data-field="mobile" data-id="${engineer.id}" value="${engineer.mobile_number_display || engineer.mobile_number}" />
             </td>
-            <td>${activeBadge}</td>
             <td class="text-end">
               <button class="btn btn-sm btn-success" data-action="save" data-id="${engineer.id}">Save</button>
-              <button class="btn btn-sm btn-outline-primary" data-action="activate" data-id="${engineer.id}" ${
-                engineer.is_active ? 'disabled' : ''
-              }>Make Active</button>
               <button class="btn btn-sm btn-outline-danger" data-action="delete" data-id="${engineer.id}">Delete</button>
             </td>
           `;
@@ -371,12 +380,37 @@
         renderWeekOverrideSelect();
       }
 
+      function renderCurrentOnCall() {
+        if (!state.monthData) {
+          currentOnCallName.textContent = 'Loading...';
+          currentOnCallDetail.textContent = '';
+          return;
+        }
+
+        const today = todayIso();
+        const todaySchedule = state.monthData.days.find((day) => day.date === today);
+
+        if (!todaySchedule) {
+          currentOnCallName.textContent = 'View this month to see today';
+          currentOnCallDetail.textContent = '';
+          return;
+        }
+
+        currentOnCallName.textContent = todaySchedule.effective_engineer_name || 'No on-call engineer';
+        currentOnCallDetail.textContent = todaySchedule.override_engineer_id !== undefined
+          ? `Today, ${today}, from calendar override`
+          : `Today, ${today}, from rolling rota`;
+      }
+
       function renderMonth() {
         calendarBody.innerHTML = '';
 
         if (!state.monthData) {
+          renderCurrentOnCall();
           return;
         }
+
+        renderCurrentOnCall();
 
         const monthDate = new Date(`${state.monthData.month}-01T00:00:00Z`);
         monthLabel.textContent = monthDate.toLocaleDateString('en-GB', {
@@ -510,10 +544,6 @@
         });
       }
 
-      async function activateEngineer(id) {
-        await apiFetch(`/api/engineers/${id}/activate`, { method: 'PUT' });
-      }
-
       async function reorderEngineers(newOrderIds) {
         await apiFetch('/api/engineers/reorder', {
           method: 'PUT',
@@ -584,10 +614,7 @@
         }
 
         try {
-          if (action === 'activate') {
-            await activateEngineer(id);
-            setAlert('Manual active engineer updated.', 'success');
-          } else if (action === 'save') {
+          if (action === 'save') {
             const nameInput = engineersBody.querySelector(`input[data-field="name"][data-id="${id}"]`);
             const mobileInput = engineersBody.querySelector(`input[data-field="mobile"][data-id="${id}"]`);
             const normalizedMobile = normalizeUkMobileInput(mobileInput && mobileInput.value);

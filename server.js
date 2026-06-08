@@ -442,7 +442,7 @@ function validateEngineerName(name) {
 
 async function getOrderedEngineers() {
   return allAsync(
-    `SELECT id, name, mobile_number, is_active, rota_position
+    `SELECT id, name, mobile_number, rota_position
      FROM engineers
      ORDER BY rota_position ASC, id ASC`
   );
@@ -522,18 +522,9 @@ async function getInviteTargetNumber() {
     return { number: rotaNumber, source: rotaEngineer.source || 'rota' };
   }
 
-  const active = await getAsync(
-    'SELECT mobile_number FROM engineers WHERE is_active = 1 ORDER BY id LIMIT 1'
-  );
-
-  const activeNumber = normalizeDialTarget(active && active.mobile_number);
-  if (activeNumber) {
-    return { number: activeNumber, source: 'manual_active' };
-  }
-
   const fallback = normalizeDialTarget(FALLBACK_NUMBER);
   if (!fallback) {
-    throw new Error('No rota assignee, no active engineer, and FALLBACK_NUMBER is missing');
+    throw new Error('No rota assignee and FALLBACK_NUMBER is missing');
   }
 
   return { number: fallback, source: 'fallback' };
@@ -1007,11 +998,6 @@ function startHttpServer() {
         ]);
       }
 
-      const activeCount = await getAsync('SELECT COUNT(*) AS count FROM engineers WHERE is_active = 1');
-      if (activeCount && activeCount.count === 0 && remainingEngineers.length > 0) {
-        await runAsync('UPDATE engineers SET is_active = 1 WHERE id = ?', [remainingEngineers[0].id]);
-      }
-
       await runAsync('COMMIT');
       return res.json({ success: true });
     } catch (err) {
@@ -1023,37 +1009,6 @@ function startHttpServer() {
 
       console.error('Failed to delete engineer:', err.message);
       return res.status(500).json({ error: 'Failed to delete engineer' });
-    }
-  });
-
-  app.put('/api/engineers/:id/activate', async (req, res) => {
-    const engineerId = Number(req.params.id);
-
-    if (!Number.isInteger(engineerId) || engineerId <= 0) {
-      return res.status(400).json({ error: 'Invalid engineer ID' });
-    }
-
-    try {
-      await runAsync('BEGIN IMMEDIATE TRANSACTION');
-      await runAsync('UPDATE engineers SET is_active = 0');
-      const result = await runAsync('UPDATE engineers SET is_active = 1 WHERE id = ?', [engineerId]);
-
-      if (!result.changes) {
-        await runAsync('ROLLBACK');
-        return res.status(404).json({ error: 'Engineer not found' });
-      }
-
-      await runAsync('COMMIT');
-      return res.json({ success: true, active_engineer_id: engineerId });
-    } catch (err) {
-      try {
-        await runAsync('ROLLBACK');
-      } catch (rollbackErr) {
-        console.error('Rollback failed:', rollbackErr.message);
-      }
-
-      console.error('Failed to activate engineer:', err.message);
-      return res.status(500).json({ error: 'Failed to activate engineer' });
     }
   });
 
