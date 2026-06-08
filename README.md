@@ -52,3 +52,11 @@ Set values in `.env`:
 Allow inbound `5060/udp` only from your SIP provider IPs.
 Allow inbound `10000-40000/udp` from your SIP provider RTP IPs.
 Restrict `8080/tcp` to your management IP.
+
+## Caller ID forwarding
+
+The Asterisk bridge preserves the inbound caller ID when it dials the on-call
+engineer by setting the outbound caller ID plus SIP identity headers
+(`P-Asserted-Identity` and `Remote-Party-ID`). Your SIP provider must allow CLI
+pass-through / caller ID presentation for forwarded calls; otherwise the
+provider may replace it with your main trunk number.
