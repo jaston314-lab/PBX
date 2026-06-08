@@ -6,11 +6,10 @@ services:
     container_name: voip-oncall-router
     ports:
       - "8080:8080"
-      - "5060:5060/udp"
     env_file:
       - .env
     environment:
-      - ENABLE_SIP_SERVER=true
+      - ENABLE_SIP_SERVER=false
     volumes:
       - ./data:/app/data
     restart: unless-stopped
@@ -25,5 +24,6 @@ services:
     env_file:
       - .env
     ports:
+      - "5060:5060/udp"
       - "10000-10100:10000-10100/udp"
     restart: unless-stopped
