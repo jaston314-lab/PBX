@@ -10,6 +10,12 @@ if [ -n "${PROVIDER_FROM_USER:-}" ]; then
 	FROM_USER_LINE="from_user=${PROVIDER_FROM_USER}"
 fi
 
+MEDIA_ADDRESS_LINE=""
+if [ -n "${EXTERNAL_MEDIA_IP:-}" ]; then
+	MEDIA_ADDRESS_LINE="media_address=${EXTERNAL_MEDIA_IP}
+bind_rtp_to_media_address=yes"
+fi
+
 cat > /etc/asterisk/pjsip.conf <<EOF
 [global]
 type=global
@@ -51,6 +57,7 @@ direct_media=no
 rtp_symmetric=yes
 force_rport=yes
 rewrite_contact=yes
+${MEDIA_ADDRESS_LINE}
 
 [provider-inbound]
 type=endpoint
@@ -63,6 +70,7 @@ direct_media=no
 rtp_symmetric=yes
 force_rport=yes
 rewrite_contact=yes
+${MEDIA_ADDRESS_LINE}
 
 [provider-identify-1]
 type=identify
