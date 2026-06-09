@@ -5,6 +5,11 @@ set -euo pipefail
 : "${PROVIDER_USERNAME:?PROVIDER_USERNAME is required}"
 : "${PROVIDER_PASSWORD:?PROVIDER_PASSWORD is required}"
 
+FROM_USER_LINE=""
+if [ -n "${PROVIDER_FROM_USER:-}" ]; then
+	FROM_USER_LINE="from_user=${PROVIDER_FROM_USER}"
+fi
+
 MEDIA_ADDRESS_LINE=""
 if [ -n "${EXTERNAL_MEDIA_IP:-}" ]; then
 	MEDIA_ADDRESS_LINE="media_address=${EXTERNAL_MEDIA_IP}"
@@ -38,6 +43,7 @@ disallow=all
 allow=ulaw,alaw
 outbound_auth=provider-auth
 aors=provider-aor
+${FROM_USER_LINE}
 from_domain=${PROVIDER_HOST}
 trust_id_outbound=yes
 send_pai=yes
