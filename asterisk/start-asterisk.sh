@@ -47,8 +47,8 @@ ${FROM_USER_LINE}
 from_domain=${PROVIDER_HOST}
 trust_id_outbound=yes
 send_pai=yes
-send_rpid=yes
-rpid_immediate=yes
+;send_rpid=yes
+;rpid_immediate=yes
 send_diversion=yes
 trust_connected_line=yes
 send_connected_line=yes
