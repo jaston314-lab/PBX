@@ -38,8 +38,8 @@ Set values in `.env`:
 - `PROVIDER_HOST` (for example `talk.voipcp.com`)
 - `PROVIDER_USERNAME`
 - `PROVIDER_PASSWORD`
-- `PROVIDER_FROM_USER` (optional, your trunk/main number if the provider requires
-  the SIP `From` user to be an authorised number)
+- `PROVIDER_FROM_USER` (deprecated — no longer used; the original caller ID is
+  passed through in the `From` header automatically)
 - `NTP_ENABLED`
 - `NTP_SERVER`
 
