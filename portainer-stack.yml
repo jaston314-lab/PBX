@@ -1,0 +1,54 @@
+services:
+  voip-oncall-router:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: voip-oncall-router
+    ports:
+      - "8080:8080"
+    environment:
+      - ADMIN_USER=${ADMIN_USER}
+      - ADMIN_PASS=${ADMIN_PASS}
+      - FALLBACK_NUMBER=${FALLBACK_NUMBER}
+      - ROUTING_API_TOKEN=${ROUTING_API_TOKEN}
+      - ENABLE_SIP_SERVER=false
+      - SIP_REDIRECT_HOST=${SIP_REDIRECT_HOST}
+      - SIP_REDIRECT_PORT=${SIP_REDIRECT_PORT}
+      - SIP_REDIRECT_NUMBER_FORMAT=${SIP_REDIRECT_NUMBER_FORMAT}
+      - PROVIDER_HOST=${PROVIDER_HOST}
+      - PROVIDER_USERNAME=${PROVIDER_USERNAME}
+      - PROVIDER_PASSWORD=${PROVIDER_PASSWORD}
+      - COMPANY_DID=${COMPANY_DID}
+      - EXTERNAL_MEDIA_IP=${EXTERNAL_MEDIA_IP}
+      - LOG_LEVEL=${LOG_LEVEL}
+      - SIP_LOG_VERBOSE=${SIP_LOG_VERBOSE}
+      - PORT=8080
+      - SIP_PORT=5060
+      - NTP_ENABLED=${NTP_ENABLED}
+      - NTP_SERVER=${NTP_SERVER}
+      - NTP_SYNC_INTERVAL_MS=${NTP_SYNC_INTERVAL_MS}
+      - NTP_TIMEOUT_MS=${NTP_TIMEOUT_MS}
+    volumes:
+      - pbx-data:/app/data
+    restart: unless-stopped
+
+  asterisk-bridge:
+    build:
+      context: ./asterisk
+      dockerfile: Dockerfile
+    container_name: asterisk-bridge
+    depends_on:
+      - voip-oncall-router
+    environment:
+      - PROVIDER_HOST=${PROVIDER_HOST}
+      - PROVIDER_USERNAME=${PROVIDER_USERNAME}
+      - PROVIDER_PASSWORD=${PROVIDER_PASSWORD}
+      - EXTERNAL_MEDIA_IP=${EXTERNAL_MEDIA_IP}
+      - ROUTING_API_TOKEN=${ROUTING_API_TOKEN}
+    ports:
+      - "5060:5060/udp"
+      - "10000-10100:10000-10100/udp"
+    restart: unless-stopped
+
+volumes:
+  pbx-data:
