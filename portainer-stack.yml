@@ -47,5 +47,5 @@ services:
       - ROUTING_API_TOKEN=${ROUTING_API_TOKEN}
     ports:
       - "5060:5060/udp"
-      - "10000-10100:10000-10100/udp"
+      - "10000-10004:10000-10004/udp"
     restart: unless-stopped
