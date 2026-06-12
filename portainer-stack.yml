@@ -29,7 +29,7 @@ services:
       - NTP_SYNC_INTERVAL_MS=${NTP_SYNC_INTERVAL_MS}
       - NTP_TIMEOUT_MS=${NTP_TIMEOUT_MS}
     volumes:
-      - pbx-data:/app/data
+      - /Containers/pbx/data:/app/data
     restart: unless-stopped
 
   asterisk-bridge:
@@ -49,6 +49,3 @@ services:
       - "5060:5060/udp"
       - "10000-10100:10000-10100/udp"
     restart: unless-stopped
-
-volumes:
-  pbx-data:
