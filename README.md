@@ -46,12 +46,12 @@ Set values in `.env`:
 ## Ports
 
 - Web portal: `8080/tcp`
-- SIP listener (Asterisk): `5060/udp`
+- SIP listener (Asterisk): `5070/udp`
 - RTP media (Asterisk): `10000-40000/udp`
 
 ## Cloud firewall recommendation
 
-Allow inbound `5060/udp` only from your SIP provider IPs.
+Allow inbound `5070/udp` only from your SIP provider IPs.
 Allow inbound `10000-40000/udp` from your SIP provider RTP IPs.
 Restrict `8080/tcp` to your management IP.
 

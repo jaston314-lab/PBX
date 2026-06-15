@@ -12,7 +12,7 @@ const { initializeDatabase, seedEngineersIfEmpty } = require('./db/init');
 dotenv.config();
 
 const HTTP_PORT = Number(process.env.PORT || 8080);
-const SIP_PORT = Number(process.env.SIP_PORT || 5060);
+const SIP_PORT = Number(process.env.SIP_PORT || 5070);
 const ADMIN_USER = process.env.ADMIN_USER || '';
 const ADMIN_PASS = process.env.ADMIN_PASS || '';
 const FALLBACK_NUMBER = (process.env.FALLBACK_NUMBER || '15551234567').trim();

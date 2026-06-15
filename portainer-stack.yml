@@ -23,7 +23,7 @@ services:
       - LOG_LEVEL=${LOG_LEVEL}
       - SIP_LOG_VERBOSE=${SIP_LOG_VERBOSE}
       - PORT=8080
-      - SIP_PORT=5060
+      - SIP_PORT=5070
       - NTP_ENABLED=${NTP_ENABLED}
       - NTP_SERVER=${NTP_SERVER}
       - NTP_SYNC_INTERVAL_MS=${NTP_SYNC_INTERVAL_MS}
@@ -46,6 +46,6 @@ services:
       - EXTERNAL_MEDIA_IP=${EXTERNAL_MEDIA_IP}
       - ROUTING_API_TOKEN=${ROUTING_API_TOKEN}
     ports:
-      - "5060:5060/udp"
+      - "5070:5070/udp"
       - "10000-10004:10000-10004/udp"
     restart: unless-stopped

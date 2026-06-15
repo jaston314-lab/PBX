@@ -14,7 +14,7 @@ COPY start-asterisk.sh /usr/local/bin/start-asterisk.sh
 
 RUN chmod +x /usr/local/bin/start-asterisk.sh
 
-EXPOSE 5060/udp
+EXPOSE 5070/udp
 EXPOSE 10000-40000/udp
 
 CMD ["/usr/local/bin/start-asterisk.sh"]

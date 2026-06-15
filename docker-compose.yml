@@ -24,6 +24,6 @@ services:
     env_file:
       - .env
     ports:
-      - "5060:5060/udp"
+      - "5070:5070/udp"
       - "10000-10004:10000-10004/udp"
     restart: unless-stopped

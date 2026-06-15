@@ -15,6 +15,6 @@ RUN mkdir -p /app/data && chown -R node:node /app
 USER node
 
 EXPOSE 8080
-EXPOSE 5060/udp
+EXPOSE 5070/udp
 
 CMD ["npm", "start"]
