@@ -37,7 +37,6 @@ services:
       context: ./asterisk
       dockerfile: Dockerfile
     container_name: asterisk-bridge
-    network_mode: host
     depends_on:
       - voip-oncall-router
     environment:
@@ -46,5 +45,7 @@ services:
       - PROVIDER_PASSWORD=${PROVIDER_PASSWORD}
       - EXTERNAL_MEDIA_IP=${EXTERNAL_MEDIA_IP}
       - ROUTING_API_TOKEN=${ROUTING_API_TOKEN}
-      - ROUTING_URL=http://127.0.0.1:8080/api/routing/current.txt
+    ports:
+      - "5070:5070/udp"
+      - "10000-10004:10000-10004/udp"
     restart: unless-stopped
