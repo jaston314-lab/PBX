@@ -69,6 +69,23 @@ async function initializeDatabase(db) {
     await runAsync(db, 'ALTER TABLE engineers ADD COLUMN rota_position INTEGER');
   }
 
+  // Overrides remember where they came from (portal or Archer Hub) and why
+  const overrideInfo = await new Promise((resolve, reject) => {
+    db.all('PRAGMA table_info(rota_overrides)', (err, rows) => {
+      if (err) {
+        return reject(err);
+      }
+      return resolve(rows || []);
+    });
+  });
+
+  const overrideColumns = new Set(overrideInfo.map((column) => column.name));
+  for (const column of ['note', 'updated_by', 'updated_at']) {
+    if (!overrideColumns.has(column)) {
+      await runAsync(db, `ALTER TABLE rota_overrides ADD COLUMN ${column} TEXT`);
+    }
+  }
+
   await runAsync(
     db,
     `UPDATE engineers

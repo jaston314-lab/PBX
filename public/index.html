@@ -239,20 +239,20 @@
         month: null,
         monthData: null,
         clockServerMsAtSync: null,
-        clockLocalMsAtSync: null
+        clockLocalMsAtSync: null,
+        rotaTimeZone: 'Europe/London'
       };
 
       function pad2(value) {
         return String(value).padStart(2, '0');
       }
 
+      // Today in the rota's time zone (UK), matching the server's midnight changeover
       function todayIso() {
-        if (state.clockServerMsAtSync && state.clockLocalMsAtSync) {
-          const serverNow = state.clockServerMsAtSync + (Date.now() - state.clockLocalMsAtSync);
-          return new Date(serverNow).toISOString().slice(0, 10);
-        }
-
-        return new Date().toISOString().slice(0, 10);
+        const now = state.clockServerMsAtSync && state.clockLocalMsAtSync
+          ? state.clockServerMsAtSync + (Date.now() - state.clockLocalMsAtSync)
+          : Date.now();
+        return new Date(now).toLocaleDateString('en-CA', { timeZone: state.rotaTimeZone });
       }
 
       function toYearMonth(date) {
@@ -495,6 +495,7 @@
         const payload = await apiFetch('/api/time');
         state.clockServerMsAtSync = payload.unix_ms;
         state.clockLocalMsAtSync = Date.now();
+        state.rotaTimeZone = payload.rota_timezone || state.rotaTimeZone;
         clockSource.textContent = `clock source: ${payload.source}${payload.ntp_server ? ` (${payload.ntp_server})` : ''}`;
       }
 

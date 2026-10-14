@@ -35,6 +35,8 @@ Set values in `.env`:
 - `ADMIN_PASS`
 - `FALLBACK_NUMBER` (UK E.164 format, for example `+447700900000`)
 - `ROUTING_API_TOKEN` (long random value used by Asterisk to fetch current target)
+- `INTEGRATION_API_TOKEN` (long random value Archer Hub uses to read the rota and
+  set overrides; leave blank to disable)
 - `PROVIDER_HOST` (for example `talk.voipcp.com`)
 - `PROVIDER_USERNAME`
 - `PROVIDER_PASSWORD`
@@ -81,3 +83,23 @@ Then check the outbound `INVITE` for `From`, `P-Asserted-Identity`,
 `Remote-Party-ID`, and `Diversion`. If those contain the original caller ID but
 the receiving phone still shows the trunk number, the provider is rewriting the
 CLI after Asterisk sends the call.
+
+## Archer Hub integration
+
+Archer Hub uses `INTEGRATION_API_TOKEN` (sent as `Authorization: Bearer <token>`
+or `X-Api-Token`) instead of the admin login. The token only reaches these
+endpoints:
+
+- `GET /api/engineers`, `GET /api/time`
+- `GET /api/rota/*`: including `GET /api/rota/days?from=YYYY-MM-DD&to=YYYY-MM-DD`
+  (up to 120 days) and `GET /api/rota/current` (who is on call now and the number
+  calls are going to)
+- `PUT /api/rota/override/*`: including `PUT /api/rota/override/days`, which sets
+  or clears several days in one transaction:
+  `{ "changes": [{ "date": "2026-10-20", "engineer_id": 2 }], "note": "...", "updated_by": "..." }`
+  (`engineer_id: null` puts the day back to the normal rota)
+
+Each override records `note`, `updated_by` and `updated_at`. Changes made in this
+portal are recorded as `portal`.
+
+Allow the Archer Hub server's address through the firewall to `8080/tcp`.

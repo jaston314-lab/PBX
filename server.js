@@ -1,5 +1,6 @@
 'use strict';
 
+const crypto = require('crypto');
 const fs = require('fs');
 const path = require('path');
 const dgram = require('dgram');
@@ -18,6 +19,7 @@ const ADMIN_PASS = process.env.ADMIN_PASS || '';
 const FALLBACK_NUMBER = (process.env.FALLBACK_NUMBER || '15551234567').trim();
 const ENABLE_SIP_SERVER = String(process.env.ENABLE_SIP_SERVER || 'true').toLowerCase() === 'true';
 const ROUTING_API_TOKEN = (process.env.ROUTING_API_TOKEN || '').trim();
+const INTEGRATION_API_TOKEN = (process.env.INTEGRATION_API_TOKEN || '').trim();
 const SIP_REDIRECT_HOST = (process.env.SIP_REDIRECT_HOST || '').trim();
 const SIP_REDIRECT_PORT = Number(process.env.SIP_REDIRECT_PORT || 0);
 const SIP_REDIRECT_NUMBER_FORMAT = (process.env.SIP_REDIRECT_NUMBER_FORMAT || 'plus').trim().toLowerCase();
@@ -27,6 +29,8 @@ const NTP_ENABLED = String(process.env.NTP_ENABLED || 'false').toLowerCase() ===
 const NTP_SERVER = (process.env.NTP_SERVER || 'pool.ntp.org').trim();
 const NTP_SYNC_INTERVAL_MS = Number(process.env.NTP_SYNC_INTERVAL_MS || 300000);
 const NTP_TIMEOUT_MS = Number(process.env.NTP_TIMEOUT_MS || 3000);
+// Rota days change over at midnight in this time zone (follows GMT/BST, not UTC)
+const ROTA_TIMEZONE = (process.env.ROTA_TIMEZONE || 'Europe/London').trim();
 
 const dataDir = path.join(__dirname, 'data');
 const dbPath = path.join(dataDir, 'router.db');
@@ -164,6 +168,32 @@ function hasValidRoutingToken(req) {
   return headerToken === ROUTING_API_TOKEN || queryToken === ROUTING_API_TOKEN;
 }
 
+function tokensMatch(provided, expected) {
+  const a = Buffer.from(String(provided || ''));
+  const b = Buffer.from(expected);
+  return a.length === b.length && crypto.timingSafeEqual(a, b);
+}
+
+// Other systems (Archer Hub) read the rota and set overrides with their own token instead of the admin login
+function hasValidIntegrationToken(req) {
+  if (!INTEGRATION_API_TOKEN) {
+    return false;
+  }
+
+  const authHeader = req.headers.authorization || '';
+  const bearer = authHeader.startsWith('Bearer ') ? authHeader.slice(7).trim() : '';
+  const token = req.headers['x-api-token'] || bearer;
+  return tokensMatch(token, INTEGRATION_API_TOKEN);
+}
+
+function isIntegrationPath(req) {
+  if (req.method === 'GET') {
+    return req.path === '/api/engineers' || req.path === '/api/time' || req.path.startsWith('/api/rota/');
+  }
+
+  return req.method === 'PUT' && req.path.startsWith('/api/rota/override/');
+}
+
 function basicAuth(req, res, next) {
   if (!ADMIN_USER || !ADMIN_PASS) {
     return res.status(500).json({ error: 'Server auth configuration is incomplete' });
@@ -274,6 +304,23 @@ function formatYearMonth(date) {
 
 function getCurrentServerTimeMs() {
   return Date.now() + serverClockState.offsetMs;
+}
+
+const rotaDateFormatter = new Intl.DateTimeFormat('en-CA', {
+  timeZone: ROTA_TIMEZONE,
+  year: 'numeric',
+  month: '2-digit',
+  day: '2-digit'
+});
+
+// Calendar date (YYYY-MM-DD) in the rota time zone at the given instant
+function rotaDateForMs(ms) {
+  const parts = Object.fromEntries(rotaDateFormatter.formatToParts(new Date(ms)).map((part) => [part.type, part.value]));
+  return `${parts.year}-${parts.month}-${parts.day}`;
+}
+
+function getCurrentRotaDate() {
+  return rotaDateForMs(getCurrentServerTimeMs());
 }
 
 function queryNtpTime(server, timeoutMs) {
@@ -450,7 +497,7 @@ async function getOrderedEngineers() {
 
 async function getRotaConfig() {
   const config = await getAsync('SELECT rota_start_date FROM rota_config WHERE id = 1');
-  const startDate = config && config.rota_start_date ? config.rota_start_date : formatDateUTC(new Date());
+  const startDate = config && config.rota_start_date ? config.rota_start_date : getCurrentRotaDate();
   return { rota_start_date: startDate };
 }
 
@@ -515,7 +562,7 @@ async function getEffectiveEngineerForDate(dateString) {
 }
 
 async function getInviteTargetNumber() {
-  const today = formatDateUTC(new Date(getCurrentServerTimeMs()));
+  const today = getCurrentRotaDate();
   const rotaEngineer = await getEffectiveEngineerForDate(today);
   const rotaNumber = normalizeDialTarget(rotaEngineer && rotaEngineer.mobile_number);
   if (rotaNumber) {
@@ -528,6 +575,82 @@ async function getInviteTargetNumber() {
   }
 
   return { number: fallback, source: 'fallback' };
+}
+
+const MAX_RANGE_DAYS = 120;
+
+// Who changed an override and why. Archer Hub sends its own label; edits made in this portal are marked 'portal'.
+function getOverrideMeta(req) {
+  const body = req.body || {};
+  const viaToken = hasValidIntegrationToken(req);
+  const clean = (value, max) => (typeof value === 'string' && value.trim() ? value.trim().slice(0, max) : null);
+  return {
+    note: viaToken ? clean(body.note, 500) : null,
+    updated_by: viaToken ? clean(body.updated_by, 100) || 'integration' : 'portal'
+  };
+}
+
+async function upsertOverride(dateString, engineerId, meta) {
+  await runAsync(
+    `INSERT INTO rota_overrides (override_date, engineer_id, note, updated_by, updated_at)
+     VALUES (?, ?, ?, ?, ?)
+     ON CONFLICT(override_date) DO UPDATE SET
+       engineer_id = excluded.engineer_id,
+       note = excluded.note,
+       updated_by = excluded.updated_by,
+       updated_at = excluded.updated_at`,
+    [dateString, engineerId, meta.note, meta.updated_by, new Date(getCurrentServerTimeMs()).toISOString()]
+  );
+}
+
+// Effective engineer for every day from..to inclusive (YYYY-MM-DD), with override details
+async function getRangeSchedule(fromString, toString) {
+  const from = parseIsoDate(fromString);
+  const to = parseIsoDate(toString);
+  if (!from || !to || to < from) {
+    throw new Error('Invalid range');
+  }
+
+  if (daysBetween(from, to) >= MAX_RANGE_DAYS) {
+    throw new Error('Range too long');
+  }
+
+  const engineers = await getOrderedEngineers();
+  const config = await getRotaConfig();
+  const overrides = await allAsync(
+    `SELECT override_date, engineer_id, note, updated_by, updated_at
+     FROM rota_overrides
+     WHERE override_date BETWEEN ? AND ?
+       AND engineer_id IS NOT NULL`,
+    [formatDateUTC(from), formatDateUTC(to)]
+  );
+
+  const overrideMap = new Map(overrides.map((item) => [item.override_date, item]));
+  const days = [];
+
+  for (let current = from; current <= to; current = addDays(current, 1)) {
+    const dateString = formatDateUTC(current);
+    const baseEngineer = await computeBaseEngineerForDate(dateString, engineers, config.rota_start_date);
+    const override = overrideMap.get(dateString);
+    const effectiveEngineer = override
+      ? engineers.find((engineer) => engineer.id === override.engineer_id) || null
+      : baseEngineer;
+
+    days.push({
+      date: dateString,
+      week_start: formatDateUTC(toWeekStartMonday(current)),
+      base_engineer_id: baseEngineer ? baseEngineer.id : null,
+      base_engineer_name: baseEngineer ? baseEngineer.name : null,
+      override_engineer_id: override ? override.engineer_id : null,
+      override_note: override ? override.note : null,
+      override_updated_by: override ? override.updated_by : null,
+      override_updated_at: override ? override.updated_at : null,
+      effective_engineer_id: effectiveEngineer ? effectiveEngineer.id : null,
+      effective_engineer_name: effectiveEngineer ? effectiveEngineer.name : null
+    });
+  }
+
+  return { from: formatDateUTC(from), to: formatDateUTC(to), rota_start_date: config.rota_start_date, days };
 }
 
 async function getWeekSchedule(weekStartString) {
@@ -811,6 +934,10 @@ function startHttpServer() {
       return next();
     }
 
+    if (isIntegrationPath(req) && hasValidIntegrationToken(req)) {
+      return next();
+    }
+
     return basicAuth(req, res, next);
   });
 
@@ -1035,7 +1162,7 @@ function startHttpServer() {
   });
 
   app.get('/api/rota/week', async (req, res) => {
-    const requestedStart = typeof req.query.start === 'string' ? req.query.start : formatDateUTC(new Date());
+    const requestedStart = typeof req.query.start === 'string' ? req.query.start : getCurrentRotaDate();
 
     try {
       const schedule = await getWeekSchedule(requestedStart);
@@ -1051,7 +1178,7 @@ function startHttpServer() {
   });
 
   app.get('/api/rota/month', async (req, res) => {
-    const currentMonth = formatYearMonth(new Date(getCurrentServerTimeMs()));
+    const currentMonth = getCurrentRotaDate().slice(0, 7);
     const requestedMonth = typeof req.query.month === 'string' ? req.query.month : currentMonth;
 
     try {
@@ -1072,12 +1199,108 @@ function startHttpServer() {
     return res.json({
       iso_now: new Date(nowMs).toISOString(),
       unix_ms: nowMs,
+      rota_timezone: ROTA_TIMEZONE,
+      rota_date: rotaDateForMs(nowMs),
       source: serverClockState.source,
       ntp_server: serverClockState.ntpServer,
       offset_ms: serverClockState.offsetMs,
       last_sync_at: serverClockState.lastSyncAt,
       last_error: serverClockState.lastError
     });
+  });
+
+  app.get('/api/rota/days', async (req, res) => {
+    try {
+      const schedule = await getRangeSchedule(String(req.query.from || ''), String(req.query.to || ''));
+      return res.json(schedule);
+    } catch (err) {
+      if (err.message === 'Invalid range') {
+        return res.status(400).json({ error: 'from and to must be YYYY-MM-DD dates with from <= to' });
+      }
+
+      if (err.message === 'Range too long') {
+        return res.status(400).json({ error: `Range must be at most ${MAX_RANGE_DAYS} days` });
+      }
+
+      console.error('Failed to load rota days:', err.message);
+      return res.status(500).json({ error: 'Failed to load rota days' });
+    }
+  });
+
+  // Who is on call right now and the number calls are being sent to (same decision the bridge makes)
+  app.get('/api/rota/current', async (_req, res) => {
+    try {
+      const today = getCurrentRotaDate();
+      const engineer = await getEffectiveEngineerForDate(today);
+      const routing = await getInviteTargetNumber();
+      return res.json({
+        date: today,
+        engineer_id: routing.source === 'fallback' || !engineer ? null : engineer.id,
+        engineer_name: routing.source === 'fallback' || !engineer ? null : engineer.name,
+        number: routing.number,
+        number_display: displayUkMobile(routing.number),
+        source: routing.source
+      });
+    } catch (err) {
+      console.error('Failed to resolve current on-call engineer:', err.message);
+      return res.status(500).json({ error: 'Failed to resolve current on-call engineer' });
+    }
+  });
+
+  // Set or clear several days in one transaction: { changes: [{ date, engineer_id|null }], note, updated_by }
+  app.put('/api/rota/override/days', async (req, res) => {
+    const changes = req.body && req.body.changes;
+
+    if (!Array.isArray(changes) || changes.length === 0 || changes.length > MAX_RANGE_DAYS) {
+      return res.status(400).json({ error: `changes must be an array of 1 to ${MAX_RANGE_DAYS} items` });
+    }
+
+    const seenDates = new Set();
+    for (const change of changes) {
+      const engineerId = change ? change.engineer_id : undefined;
+      if (!change || !parseIsoDate(change.date) || seenDates.has(change.date)) {
+        return res.status(400).json({ error: 'Each change needs a unique YYYY-MM-DD date' });
+      }
+
+      if (engineerId !== null && (!Number.isInteger(engineerId) || engineerId <= 0)) {
+        return res.status(400).json({ error: 'engineer_id must be null or a positive integer' });
+      }
+
+      seenDates.add(change.date);
+    }
+
+    try {
+      const engineerIds = [...new Set(changes.map((change) => change.engineer_id).filter((id) => id !== null))];
+      for (const engineerId of engineerIds) {
+        const engineer = await getAsync('SELECT id FROM engineers WHERE id = ?', [engineerId]);
+        if (!engineer) {
+          return res.status(404).json({ error: `Engineer ${engineerId} not found` });
+        }
+      }
+
+      const meta = getOverrideMeta(req);
+      await runAsync('BEGIN IMMEDIATE TRANSACTION');
+
+      for (const change of changes) {
+        if (change.engineer_id === null) {
+          await runAsync('DELETE FROM rota_overrides WHERE override_date = ?', [change.date]);
+        } else {
+          await upsertOverride(change.date, change.engineer_id, meta);
+        }
+      }
+
+      await runAsync('COMMIT');
+      return res.json({ success: true, updated: changes.length });
+    } catch (err) {
+      try {
+        await runAsync('ROLLBACK');
+      } catch (rollbackErr) {
+        console.error('Rollback failed on multi-day override:', rollbackErr.message);
+      }
+
+      console.error('Failed to save multi-day override:', err.message);
+      return res.status(500).json({ error: 'Failed to save overrides' });
+    }
   });
 
   app.put('/api/rota/override/day', async (req, res) => {
@@ -1105,12 +1328,7 @@ function startHttpServer() {
         }
       }
 
-      await runAsync(
-        `INSERT INTO rota_overrides (override_date, engineer_id)
-         VALUES (?, ?)
-         ON CONFLICT(override_date) DO UPDATE SET engineer_id = excluded.engineer_id`,
-        [overrideDate, engineerId]
-      );
+      await upsertOverride(overrideDate, engineerId, getOverrideMeta(req));
 
       return res.json({ success: true });
     } catch (err) {
@@ -1154,12 +1372,7 @@ function startHttpServer() {
 
       for (let offset = 0; offset < 7; offset += 1) {
         const dateString = formatDateUTC(addDays(monday, offset));
-        await runAsync(
-          `INSERT INTO rota_overrides (override_date, engineer_id)
-           VALUES (?, ?)
-           ON CONFLICT(override_date) DO UPDATE SET engineer_id = excluded.engineer_id`,
-          [dateString, engineerId]
-        );
+        await upsertOverride(dateString, engineerId, getOverrideMeta(req));
       }
 
       await runAsync('COMMIT');
