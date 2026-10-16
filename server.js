@@ -501,24 +501,77 @@ async function getRotaConfig() {
   return { rota_start_date: startDate };
 }
 
-async function clearEmptyRotaOverrides() {
-  await runAsync('DELETE FROM rota_overrides WHERE engineer_id IS NULL');
+// Rota by year, in start date order: [{ year, start_date, engineer_order (JSON list of engineer ids, or null) }]
+async function getRotaYears() {
+  return allAsync('SELECT year, start_date, engineer_order FROM rota_years ORDER BY start_date ASC');
 }
 
-async function computeBaseEngineerForDate(dateString, engineers, rotaStartDate) {
-  if (!engineers.length) {
+function parseEngineerOrder(value) {
+  try {
+    const list = JSON.parse(value);
+    return Array.isArray(list) ? list.map(Number).filter((id) => Number.isInteger(id) && id > 0) : null;
+  } catch (err) {
+    return null;
+  }
+}
+
+// Overrides left with no engineer (e.g. the engineer was deleted) are cleared; days marked unassigned are kept
+async function clearEmptyRotaOverrides() {
+  await runAsync('DELETE FROM rota_overrides WHERE engineer_id IS NULL AND COALESCE(unassigned, 0) = 0');
+}
+
+// Once any rota year is set up, a date not covered by an added year is unassigned (before the first year, in a gap, or
+// after the last). A year runs from its start date until the next year's start date, if the next year has been added;
+// otherwise until the end of that year. With no years set up, the original start date runs the rota as before.
+function isInMissingRotaYear(dateString, rotaYears = []) {
+  if (!rotaYears.length) {
+    return false;
+  }
+
+  const period = [...rotaYears].reverse().find((item) => item.start_date <= dateString);
+  if (!period) {
+    return true;
+  }
+
+  const next = rotaYears.find((item) => item.year === period.year + 1);
+  if (next && next.start_date > dateString) {
+    return false;
+  }
+
+  return dateString > `${period.year}-12-31`;
+}
+
+// The rota's engineer for a date: weekly from a start date, in order. If a rota year has started by this date, its start
+// date and engineer order are used; otherwise the original start date and the engineer list order.
+async function computeBaseEngineerForDate(dateString, engineers, rotaStartDate, rotaYears = []) {
+  let order = engineers;
+  let start = rotaStartDate;
+  if (isInMissingRotaYear(dateString, rotaYears)) {
+    return null;
+  }
+
+  const period = [...rotaYears].reverse().find((item) => item.start_date <= dateString);
+  if (period) {
+    start = period.start_date;
+    const ids = parseEngineerOrder(period.engineer_order);
+    if (ids && ids.length) {
+      order = ids.map((id) => engineers.find((engineer) => engineer.id === id)).filter(Boolean);
+    }
+  }
+
+  if (!order.length) {
     return null;
   }
 
   const targetDate = parseIsoDate(dateString);
-  const startDate = parseIsoDate(rotaStartDate);
+  const startDate = parseIsoDate(start);
   if (!targetDate || !startDate) {
     return null;
   }
 
   const weeksSinceStart = Math.floor(daysBetween(startDate, targetDate) / 7);
-  const index = positiveModulo(weeksSinceStart, engineers.length);
-  return engineers[index];
+  const index = positiveModulo(weeksSinceStart, order.length);
+  return order[index];
 }
 
 async function getEffectiveEngineerForDate(dateString) {
@@ -528,12 +581,16 @@ async function getEffectiveEngineerForDate(dateString) {
   }
 
   const override = await getAsync(
-    `SELECT ro.engineer_id, e.id, e.name, e.mobile_number
+    `SELECT ro.engineer_id, ro.unassigned, e.id, e.name, e.mobile_number
      FROM rota_overrides ro
      LEFT JOIN engineers e ON e.id = ro.engineer_id
      WHERE ro.override_date = ?`,
     [dateString]
   );
+
+  if (override && override.unassigned) {
+    return null;
+  }
 
   if (override) {
     if (override.engineer_id && override.id) {
@@ -547,7 +604,8 @@ async function getEffectiveEngineerForDate(dateString) {
   }
 
   const config = await getRotaConfig();
-  const base = await computeBaseEngineerForDate(dateString, engineers, config.rota_start_date);
+  const rotaYears = await getRotaYears();
+  const base = await computeBaseEngineerForDate(dateString, engineers, config.rota_start_date, rotaYears);
 
   if (!base) {
     return null;
@@ -590,16 +648,18 @@ function getOverrideMeta(req) {
   };
 }
 
-async function upsertOverride(dateString, engineerId, meta) {
+// An override: a day given to an engineer, or (unassigned) marked as nobody on call yet
+async function upsertOverride(dateString, engineerId, meta, unassigned = false) {
   await runAsync(
-    `INSERT INTO rota_overrides (override_date, engineer_id, note, updated_by, updated_at)
-     VALUES (?, ?, ?, ?, ?)
+    `INSERT INTO rota_overrides (override_date, engineer_id, unassigned, note, updated_by, updated_at)
+     VALUES (?, ?, ?, ?, ?, ?)
      ON CONFLICT(override_date) DO UPDATE SET
        engineer_id = excluded.engineer_id,
+       unassigned = excluded.unassigned,
        note = excluded.note,
        updated_by = excluded.updated_by,
        updated_at = excluded.updated_at`,
-    [dateString, engineerId, meta.note, meta.updated_by, new Date(getCurrentServerTimeMs()).toISOString()]
+    [dateString, unassigned ? null : engineerId, unassigned ? 1 : 0, meta.note, meta.updated_by, new Date(getCurrentServerTimeMs()).toISOString()]
   );
 }
 
@@ -617,11 +677,12 @@ async function getRangeSchedule(fromString, toString) {
 
   const engineers = await getOrderedEngineers();
   const config = await getRotaConfig();
+  const rotaYears = await getRotaYears();
   const overrides = await allAsync(
-    `SELECT override_date, engineer_id, note, updated_by, updated_at
+    `SELECT override_date, engineer_id, unassigned, note, updated_by, updated_at
      FROM rota_overrides
      WHERE override_date BETWEEN ? AND ?
-       AND engineer_id IS NOT NULL`,
+       AND (engineer_id IS NOT NULL OR unassigned = 1)`,
     [formatDateUTC(from), formatDateUTC(to)]
   );
 
@@ -630,18 +691,22 @@ async function getRangeSchedule(fromString, toString) {
 
   for (let current = from; current <= to; current = addDays(current, 1)) {
     const dateString = formatDateUTC(current);
-    const baseEngineer = await computeBaseEngineerForDate(dateString, engineers, config.rota_start_date);
+    const baseEngineer = await computeBaseEngineerForDate(dateString, engineers, config.rota_start_date, rotaYears);
     const override = overrideMap.get(dateString);
-    const effectiveEngineer = override
-      ? engineers.find((engineer) => engineer.id === override.engineer_id) || null
-      : baseEngineer;
+    const unassigned = !!(override && override.unassigned) || (!override && isInMissingRotaYear(dateString, rotaYears));
+    const effectiveEngineer = unassigned
+      ? null
+      : override
+        ? engineers.find((engineer) => engineer.id === override.engineer_id) || null
+        : baseEngineer;
 
     days.push({
       date: dateString,
       week_start: formatDateUTC(toWeekStartMonday(current)),
       base_engineer_id: baseEngineer ? baseEngineer.id : null,
       base_engineer_name: baseEngineer ? baseEngineer.name : null,
-      override_engineer_id: override ? override.engineer_id : null,
+      unassigned,
+      override_engineer_id: override && !unassigned ? override.engineer_id : null,
       override_note: override ? override.note : null,
       override_updated_by: override ? override.updated_by : null,
       override_updated_at: override ? override.updated_at : null,
@@ -663,9 +728,10 @@ async function getWeekSchedule(weekStartString) {
   const mondayString = formatDateUTC(monday);
   const engineers = await getOrderedEngineers();
   const config = await getRotaConfig();
+  const rotaYears = await getRotaYears();
 
   const overrides = await allAsync(
-    `SELECT ro.override_date, ro.engineer_id, e.name AS engineer_name
+    `SELECT ro.override_date, ro.engineer_id, ro.unassigned, e.name AS engineer_name
      FROM rota_overrides ro
      LEFT JOIN engineers e ON e.id = ro.engineer_id
      WHERE ro.override_date BETWEEN ? AND ?
@@ -679,17 +745,20 @@ async function getWeekSchedule(weekStartString) {
   for (let offset = 0; offset < 7; offset += 1) {
     const currentDate = addDays(monday, offset);
     const dateString = formatDateUTC(currentDate);
-    const baseEngineer = await computeBaseEngineerForDate(dateString, engineers, config.rota_start_date);
+    const baseEngineer = await computeBaseEngineerForDate(dateString, engineers, config.rota_start_date, rotaYears);
     const override = overrideMap.get(dateString);
 
-    const effectiveEngineer =
-      override && override.engineer_id
+    const unassigned = !!(override && override.unassigned) || (!override && isInMissingRotaYear(dateString, rotaYears));
+    const effectiveEngineer = unassigned
+      ? null
+      : override && override.engineer_id
         ? engineers.find((engineer) => engineer.id === override.engineer_id) || null
         : baseEngineer;
 
     days.push({
       date: dateString,
       weekday: currentDate.toLocaleDateString('en-GB', { weekday: 'long', timeZone: 'UTC' }),
+      unassigned,
       base_engineer_id: baseEngineer ? baseEngineer.id : null,
       base_engineer_name: baseEngineer ? baseEngineer.name : null,
       override_engineer_id: override && override.engineer_id ? override.engineer_id : undefined,
@@ -718,32 +787,38 @@ async function getMonthSchedule(monthString) {
 
   const engineers = await getOrderedEngineers();
   const config = await getRotaConfig();
+  const rotaYears = await getRotaYears();
   const overrides = await allAsync(
-    `SELECT override_date, engineer_id
+    `SELECT override_date, engineer_id, unassigned
      FROM rota_overrides
      WHERE override_date BETWEEN ? AND ?
-       AND engineer_id IS NOT NULL`,
+       AND (engineer_id IS NOT NULL OR unassigned = 1)`,
     [monthStartString, monthEndString]
   );
 
-  const overrideMap = new Map(overrides.map((item) => [item.override_date, item.engineer_id]));
+  const overrideMap = new Map(overrides.filter((item) => !item.unassigned).map((item) => [item.override_date, item.engineer_id]));
+  const unassignedDates = new Set(overrides.filter((item) => item.unassigned).map((item) => item.override_date));
   const days = [];
   const totalDays = monthEnd.getUTCDate();
 
   for (let day = 1; day <= totalDays; day += 1) {
     const current = new Date(Date.UTC(parsedMonth.year, parsedMonth.month - 1, day));
     const dateString = formatDateUTC(current);
-    const baseEngineer = await computeBaseEngineerForDate(dateString, engineers, config.rota_start_date);
+    const baseEngineer = await computeBaseEngineerForDate(dateString, engineers, config.rota_start_date, rotaYears);
     const overrideEngineerId = overrideMap.has(dateString) ? overrideMap.get(dateString) : undefined;
 
+    const unassigned = unassignedDates.has(dateString) || (overrideEngineerId === undefined && isInMissingRotaYear(dateString, rotaYears));
     let effectiveEngineer = baseEngineer;
-    if (overrideEngineerId !== undefined) {
+    if (unassigned) {
+      effectiveEngineer = null;
+    } else if (overrideEngineerId !== undefined) {
       effectiveEngineer = engineers.find((engineer) => engineer.id === overrideEngineerId) || null;
     }
 
     days.push({
       date: dateString,
       day,
+      unassigned,
       week_start: formatDateUTC(toWeekStartMonday(current)),
       base_engineer_id: baseEngineer ? baseEngineer.id : null,
       base_engineer_name: baseEngineer ? baseEngineer.name : null,
@@ -1161,6 +1236,77 @@ function startHttpServer() {
     }
   });
 
+  // Rota by year: [{ year, start_date, engineer_order: [ids] | null }]
+  app.get('/api/rota/years', async (_req, res) => {
+    try {
+      const years = await getRotaYears();
+      return res.json(years.map((item) => ({ year: item.year, start_date: item.start_date, engineer_order: parseEngineerOrder(item.engineer_order) })));
+    } catch (err) {
+      console.error('Failed to load rota years:', err.message);
+      return res.status(500).json({ error: 'Failed to load rota years' });
+    }
+  });
+
+  // Set a year's start date (it may fall in the last weeks of the year before) and its engineer order (null = the
+  // engineer list order)
+  app.put('/api/rota/years/:year', async (req, res) => {
+    const year = Number(req.params.year);
+    const startDate = req.body && req.body.start_date;
+    const order = req.body && req.body.engineer_order;
+    if (!Number.isInteger(year) || year < 2000 || year > 2100) {
+      return res.status(400).json({ error: 'year must be between 2000 and 2100' });
+    }
+
+    const parsed = parseIsoDate(startDate);
+    if (!parsed) {
+      return res.status(400).json({ error: 'start_date must be YYYY-MM-DD' });
+    }
+
+    const startYear = parsed.getUTCFullYear();
+    if (startYear !== year && !(startYear === year - 1 && parsed.getUTCMonth() === 11)) {
+      return res.status(400).json({ error: `The start date for ${year} must be in ${year} (or December ${year - 1})` });
+    }
+
+    if (order !== null && order !== undefined && (!Array.isArray(order) || order.some((id) => !Number.isInteger(id) || id <= 0))) {
+      return res.status(400).json({ error: 'engineer_order must be a list of engineer ids, or null' });
+    }
+
+    try {
+      const others = await allAsync('SELECT year, start_date FROM rota_years WHERE year != ?', [year]);
+      const clash = others.find((item) => (item.year < year && item.start_date >= startDate) || (item.year > year && item.start_date <= startDate));
+      if (clash) {
+        return res.status(400).json({ error: `That start date overlaps ${clash.year}, which starts on ${clash.start_date}` });
+      }
+
+      if (Array.isArray(order) && order.length) {
+        const known = await allAsync(`SELECT id FROM engineers WHERE id IN (${order.map(() => '?').join(',')})`, order);
+        if (known.length !== new Set(order).size) {
+          return res.status(400).json({ error: 'One of those engineers no longer exists' });
+        }
+      }
+
+      await runAsync(
+        `INSERT INTO rota_years (year, start_date, engineer_order) VALUES (?, ?, ?)
+         ON CONFLICT(year) DO UPDATE SET start_date = excluded.start_date, engineer_order = excluded.engineer_order`,
+        [year, startDate, Array.isArray(order) && order.length ? JSON.stringify(order) : null]
+      );
+      return res.json({ success: true });
+    } catch (err) {
+      console.error('Failed to save rota year:', err.message);
+      return res.status(500).json({ error: 'Failed to save rota year' });
+    }
+  });
+
+  app.delete('/api/rota/years/:year', async (req, res) => {
+    try {
+      await runAsync('DELETE FROM rota_years WHERE year = ?', [Number(req.params.year)]);
+      return res.json({ success: true });
+    } catch (err) {
+      console.error('Failed to delete rota year:', err.message);
+      return res.status(500).json({ error: 'Failed to delete rota year' });
+    }
+  });
+
   app.get('/api/rota/week', async (req, res) => {
     const requestedStart = typeof req.query.start === 'string' ? req.query.start : getCurrentRotaDate();
 
@@ -1239,7 +1385,9 @@ function startHttpServer() {
         engineer_name: routing.source === 'fallback' || !engineer ? null : engineer.name,
         number: routing.number,
         number_display: displayUkMobile(routing.number),
-        source: routing.source
+        source: routing.source,
+        unassigned: routing.source === 'fallback' && (!!(await getAsync('SELECT 1 FROM rota_overrides WHERE override_date = ? AND unassigned = 1', [today]))
+          || isInMissingRotaYear(today, await getRotaYears()))
       });
     } catch (err) {
       console.error('Failed to resolve current on-call engineer:', err.message);
@@ -1262,7 +1410,7 @@ function startHttpServer() {
         return res.status(400).json({ error: 'Each change needs a unique YYYY-MM-DD date' });
       }
 
-      if (engineerId !== null && (!Number.isInteger(engineerId) || engineerId <= 0)) {
+      if (engineerId !== null && engineerId !== undefined && (!Number.isInteger(engineerId) || engineerId <= 0)) {
         return res.status(400).json({ error: 'engineer_id must be null or a positive integer' });
       }
 
@@ -1270,7 +1418,7 @@ function startHttpServer() {
     }
 
     try {
-      const engineerIds = [...new Set(changes.map((change) => change.engineer_id).filter((id) => id !== null))];
+      const engineerIds = [...new Set(changes.filter((change) => !change.unassigned).map((change) => change.engineer_id).filter((id) => id !== null && id !== undefined))];
       for (const engineerId of engineerIds) {
         const engineer = await getAsync('SELECT id FROM engineers WHERE id = ?', [engineerId]);
         if (!engineer) {
@@ -1282,7 +1430,9 @@ function startHttpServer() {
       await runAsync('BEGIN IMMEDIATE TRANSACTION');
 
       for (const change of changes) {
-        if (change.engineer_id === null) {
+        if (change.unassigned === true) {
+          await upsertOverride(change.date, null, meta, true);
+        } else if (change.engineer_id === null || change.engineer_id === undefined) {
           await runAsync('DELETE FROM rota_overrides WHERE override_date = ?', [change.date]);
         } else {
           await upsertOverride(change.date, change.engineer_id, meta);
@@ -1316,6 +1466,11 @@ function startHttpServer() {
     }
 
     try {
+      if (req.body && req.body.unassigned === true) {
+        await upsertOverride(overrideDate, null, getOverrideMeta(req), true);
+        return res.json({ success: true });
+      }
+
       if (engineerId === null) {
         await runAsync('DELETE FROM rota_overrides WHERE override_date = ?', [overrideDate]);
         return res.json({ success: true });
@@ -1360,6 +1515,14 @@ function startHttpServer() {
 
       const monday = toWeekStartMonday(parsedStart);
       await runAsync('BEGIN IMMEDIATE TRANSACTION');
+
+      if (req.body && req.body.unassigned === true) {
+        for (let offset = 0; offset < 7; offset += 1) {
+          await upsertOverride(formatDateUTC(addDays(monday, offset)), null, getOverrideMeta(req), true);
+        }
+        await runAsync('COMMIT');
+        return res.json({ success: true, week_start: formatDateUTC(monday) });
+      }
 
       if (engineerId === null) {
         await runAsync('DELETE FROM rota_overrides WHERE override_date BETWEEN ? AND ?', [

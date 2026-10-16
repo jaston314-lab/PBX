@@ -86,6 +86,22 @@ async function initializeDatabase(db) {
     }
   }
 
+  // A day can be marked unassigned: nobody on call yet (calls go to the fallback number)
+  if (!overrideColumns.has('unassigned')) {
+    await runAsync(db, 'ALTER TABLE rota_overrides ADD COLUMN unassigned INTEGER NOT NULL DEFAULT 0');
+  }
+
+  // Rota by year: from a year's start date the rota follows that year's engineer order, until the next year's start
+  // date. Dates before the first one use rota_config's start date and the engineer list order, as before.
+  await runAsync(
+    db,
+    `CREATE TABLE IF NOT EXISTS rota_years (
+      year INTEGER PRIMARY KEY,
+      start_date TEXT NOT NULL,
+      engineer_order TEXT
+    )`
+  );
+
   await runAsync(
     db,
     `UPDATE engineers
